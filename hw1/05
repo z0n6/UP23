@@ -1,0 +1,2 @@
+#!/usr/bin/sh
+./launcher ./sandbox.so config.txt wget http://google.com -t 1

@@ -1,0 +1,2 @@
+#!/usr/bin/sh
+./launcher ./sandbox.so config.txt python3 -c 'import os;os.system("wget http://www.google.com -q -t 1")'

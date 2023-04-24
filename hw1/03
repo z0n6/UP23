@@ -1,0 +1,2 @@
+#!/usr/bin/sh
+./launcher ./sandbox.so config.txt cat /etc/ssl/certs/Amazon_Root_CA_1.pem
