@@ -1,1 +1,1 @@
-# 2023 Spring UNIX Programming
+# UNIX Programming
