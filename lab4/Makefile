@@ -6,6 +6,7 @@ all: $(FILES)
 
 %: %.c
 	$(CC) -o $@ $^ $(CFLAGS)
+	objdump -D $@ -M intel > $@.s
 
 submit:
 	./submit.py solver
@@ -14,5 +15,6 @@ submit_asm:
 	./submit2.py
 
 clean: 
-	rm -rf __pycache__
-	rm $(FILES)
+	-rm -rf __pycache__
+	-rm *.s
+	-rm $(FILES)
