@@ -17,7 +17,7 @@
 #define MAX_NAME_LEN 128
 #define errquit(m) { perror(m); exit(EXIT_FAILURE); }
 
-static int DEBUG = 1;
+static int DEBUG = 0;
 static char *APIList[] = {"open", "read", "write", "connect", "getaddrinfo", "system"};
 
 typedef int (main_func_t)(int, char *, char **);
@@ -235,12 +235,6 @@ int my_system(const char *command) {
     int logger_fd = atoi(getenv("LOGGER_FD"));
 
     dprintf(logger_fd, "[logger] system(\"%s\")\n", command);
-    
-    if (setenv("LD_PRELOAD", "./sandbox.so", 1) < 0) errquit("my_system/setenv");
-
-    // Call the original read function
-    // orig_system = dlsym(RTLD_DEFAULT, "system");
-    // int ret = system(command);
 
     return system(command);
 }
@@ -360,6 +354,8 @@ int __libc_start_main(main_func_t main,
 
     // recover memory protection
     if (mprotect(prot, prot_end - prot_start, PROT_READ | PROT_WRITE) < 0) errquit("mprotect/recover");
+
+    if (setenv("LD_PRELOAD", "./sandbox.so", 1) < 0) errquit("__libc_start_main/setenv");
 
     if (DEBUG) printf("=========== START ===========\n");
     orig___libc_start_main = dlsym(RTLD_NEXT, "__libc_start_main");
