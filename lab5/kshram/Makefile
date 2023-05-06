@@ -1,12 +1,9 @@
 
-obj-m     += kshrammod.o
+obj-m     += kshram.o
 ccflags-y += -DEXPORT_SYMTAB
 
-all: kshram
+all:
 	make -C ../dist/modulebuild M=$(PWD) modules
-
-kshram: kshram.c
-	$(CROSS_COMPILE)gcc -o $@ $< -Wall -static
 
 clean:
 	rm -f kshram
@@ -14,4 +11,4 @@ clean:
 
 install: all
 	mkdir -p ../rootfs/modules
-	cp kshram kshrammod.ko ../rootfs/modules
+	cp kshram.ko ../rootfs/modules
