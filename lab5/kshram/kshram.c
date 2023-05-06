@@ -144,10 +144,6 @@ static int __init kshrammod_init(void)
             goto release_cdevs;
     }
 
-	// cdev_init(&c_dev, &kshrammod_dev_fops);
-	// if(cdev_add(&c_dev, devnum, NUM_DEVICES) == -1)
-	// 	goto release_device;
-
 	// create proc
 	proc_create("kshram", 0, NULL, &kshrammod_proc_fops);
 
