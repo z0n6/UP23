@@ -1,2 +1,1 @@
-# PASSED
-:tada:
+# PASSED :tada:
