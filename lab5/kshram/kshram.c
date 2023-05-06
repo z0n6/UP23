@@ -21,41 +21,51 @@
 #include "kshram.h"
 
 #define NUM_DEVICES 8 // number of devices
+#define DEVICE_SIZE 4096 // default size of device
 
 static dev_t devnum;
 static struct cdev *c_devs;
 static struct class *clazz;
 
+struct kshram_device {
+	void *data;
+	size_t size;
+};
+static struct kshram_device devices[NUM_DEVICES];
+
 static int kshrammod_dev_open(struct inode *i, struct file *f) {
-	printk(KERN_INFO "kshrammod: device opened.\n");
+	printk(KERN_INFO "kshram: device opened.\n");
 	return 0;
 }
 
 static int kshrammod_dev_close(struct inode *i, struct file *f) {
-	printk(KERN_INFO "kshrammod: device closed.\n");
+	printk(KERN_INFO "kshram: device closed.\n");
 	return 0;
 }
 
 static ssize_t kshrammod_dev_read(struct file *f, char __user *buf, size_t len, loff_t *off) {
-	printk(KERN_INFO "kshrammod: read %zu bytes @ %llu.\n", len, *off);
+	printk(KERN_INFO "kshram: read %zu bytes @ %llu.\n", len, *off);
 	return len;
 }
 
 static ssize_t kshrammod_dev_write(struct file *f, const char __user *buf, size_t len, loff_t *off) {
-	printk(KERN_INFO "kshrammod: write %zu bytes @ %llu.\n", len, *off);
+	printk(KERN_INFO "kshram: write %zu bytes @ %llu.\n", len, *off);
 	return len;
 }
 
 static long kshrammod_dev_ioctl(struct file *fp, unsigned int cmd, unsigned long arg) {
-	printk(KERN_INFO "kshrammod: ioctl cmd=%u arg=%lu.\n", cmd, arg);
+	const char *name = fp->f_path.dentry->d_name.name;
+	int index = (int) (name[6]-48);
+	printk(KERN_INFO "kshram: ioctl cmd=%u arg=%lu.\n", cmd, arg);
 	switch (cmd) {
 		case KSHRAM_GETSLOTS:
 			return 8;
 		case KSHRAM_GETSIZE:
-			return fp->f_path.dentry->d_inode->i_size;
+			return devices[index].size;
 		case KSHRAM_SETSIZE:
-			void *p = krealloc(fp->f_path.dentry->d_inode->i_cdev, arg, GFP_KERNEL);
-			if (!p) {
+			devices[index].data = krealloc(devices[index].data, arg, GFP_KERNEL);
+			devices[index].size = arg;
+			if (!devices[index].data) {
 				; // error handling
 			}
 	}
@@ -63,11 +73,12 @@ static long kshrammod_dev_ioctl(struct file *fp, unsigned int cmd, unsigned long
 	return 0;
 }
 
-static void *kmalloc_ptr;
 
 static int kshrammod_dev_mmaps(struct file *f, struct vm_area_struct *vma)
 {
-    int ret;
+	const char *name = f->f_path.dentry->d_name.name;
+	int index = (int) (name[6]-48);
+	int ret;
     long length = vma->vm_end - vma->vm_start;
 
     /* check length - do not allow larger mappings than the number of pages allocated */
@@ -77,11 +88,12 @@ static int kshrammod_dev_mmaps(struct file *f, struct vm_area_struct *vma)
     /* map the whole physically contiguous area in one piece */
     if ((ret = remap_pfn_range(vma,
                                vma->vm_start,
-                               page_to_pfn(virt_to_page(kmalloc_ptr)),
+                               page_to_pfn(virt_to_page(devices[index].data)),
                                length,
                                vma->vm_page_prot)) < 0) {
         return ret;
     }
+	printk(KERN_INFO "kshram/mmap idx %d size %ld\n", index, length);
 
     return 0;
 }
@@ -97,8 +109,8 @@ static const struct file_operations kshrammod_dev_fops = {
 };
 
 static int kshrammod_proc_read(struct seq_file *m, void *v) {
-	char buf[] = "`kshram, world!` in /proc.\n";
-	seq_printf(m, buf);
+	for(int i = 0; i < NUM_DEVICES; i++)
+		seq_printf(m, "%02d: %ld\n", i, devices[i].size);
 	return 0;
 }
 
@@ -129,6 +141,9 @@ static int __init kshrammod_init(void)
 		goto release_region;
 	clazz->devnode = kshrammod_devnode;
 	for (i = 0; i < NUM_DEVICES; i++) {
+		devices[i].data = kzalloc(DEVICE_SIZE, GFP_KERNEL);
+		devices[i].size = DEVICE_SIZE;
+		printk(KERN_INFO "kshram%d: %ld bytes allocated @ %px\n", i, devices[i].size, devices[i].data);
 		if(device_create(clazz, NULL, MKDEV(MAJOR(devnum), MINOR(devnum) + i), NULL, "kshram%d", i) == NULL)
 			goto release_class;
 	}
@@ -147,7 +162,7 @@ static int __init kshrammod_init(void)
 	// create proc
 	proc_create("kshram", 0, NULL, &kshrammod_proc_fops);
 
-	printk(KERN_INFO "kshrammod: initialized.\n");
+	printk(KERN_INFO "kshram: initialized.\n");
 	return 0;    // Non-zero return means that the module couldn't be loaded.
 
 release_cdevs:
@@ -175,7 +190,7 @@ static void __exit kshrammod_cleanup(void)
 	class_destroy(clazz);
 	unregister_chrdev_region(devnum, NUM_DEVICES);
 
-	printk(KERN_INFO "kshrammod: cleaned up.\n");
+	printk(KERN_INFO "kshram: cleaned up.\n");
 }
 
 module_init(kshrammod_init);
