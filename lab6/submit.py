@@ -13,9 +13,9 @@ context.arch = 'amd64'
 context.os = 'linux'
 #context.log_level = 'debug'
 
-r = process("./temp", shell=False)
+# r = process("./temp", shell=False)
 # r = remote("localhost", 10950)
-# r = remote("up23.zoolab.org", 10950)
+r = remote("up23.zoolab.org", 10950)
 
 if type(r) != pwnlib.tubes.process.process:
     pw.solve_pow(r)
