@@ -27,24 +27,6 @@ void increaseBinaryString(char* str) {
     }
 }
 
-void dumpString(pid_t pid, unsigned long address) {
-    char buffer[MAX_LENGTH];
-    int offset = 0;
-
-    while (1) {
-        long word = ptrace(PTRACE_PEEKDATA, pid, address + offset, NULL);
-        for (int i = 0; i < sizeof(long); ++i) {
-            buffer[offset + i] = *((char*)(&word) + i);
-            if (buffer[offset + i] == '\0') {
-                // Null byte encountered, end of string
-                printf("Dumped magic: %s\n", buffer);
-                return;
-            }
-        }
-        offset += sizeof(long);
-    }
-}
-
 void getString(pid_t pid, unsigned long address, char buffer[]) {
     int offset = 0;
 
@@ -52,7 +34,7 @@ void getString(pid_t pid, unsigned long address, char buffer[]) {
         long word = ptrace(PTRACE_PEEKDATA, pid, address + offset, NULL);
         for (int i = 0; i < sizeof(long); ++i) {
             buffer[offset + i] = *((char*)(&word) + i);
-            if (buffer[offset + i] == '\0') {
+            if (buffer[offset + i] == '\0') { 
                 // Null byte encountered, end of string
                 return;
             }
@@ -147,10 +129,6 @@ void run_debugger(pid_t child_pid)
     ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
     procmsg("Child started. RIP = 0x%08x\n", regs.rip);
 
-    long addr = 0x004000cb;//0x004000da;
-    long data = ptrace(PTRACE_PEEKTEXT, child_pid, (void*)addr, 0);
-    procmsg("Original data at 0x%08x: 0x%08x\n", addr, data);
-
     /* Let the child run to the breakpoint and wait for it to
     ** reach it
     */
@@ -162,24 +140,19 @@ void run_debugger(pid_t child_pid)
         if (WIFSTOPPED(wait_status)) {
             if (WSTOPSIG(wait_status) == SIGTRAP) {
                 /* See where the child is now */
-                // long code;
                 ptrace(PTRACE_GETREGS, child_pid, 0, &regs);
-                // procmsg("Trap %d\n", ++ntrap);
                 ++ntrap;
 
                 if (ntrap == 2) { /* store address of magic */
                     magic_addr = regs.rax;
-                    procmsg("Magic at %llx\n", magic_addr);
-                    // printf("Magic at %llx\n", magic_addr);
+                    procmsg("Trap %d: find magic at %llx\n", ntrap, magic_addr);
                 }
                 if (ntrap == 4) { /* snapshot */
                     snapshot = regs;
-                    procmsg("store registers snapshot\n");
-                    // printf("register snapshoted\n");
+                    procmsg("Trap %d: store registers snapshot\n", ntrap);
                 }
                 if (ntrap >= 5 && (int) regs.rax < 0 && ntrap <= 2052) {
                     ptrace(PTRACE_SETREGS, child_pid, 0, &snapshot);
-                    // dumpString(child_pid, magic_addr);
                     char magic[11];
                     getString(child_pid, magic_addr, magic);
                     // printf("magic is %s\n", magic);
@@ -202,9 +175,8 @@ void run_debugger(pid_t child_pid)
     if (WIFEXITED(wait_status)) {
         procmsg("Child exited\n");
     } else if(WIFSIGNALED(wait_status)) {
-    procmsg("signal !!!\n");
-    }
-    else {
+        procmsg("signal !!!\n");
+    } else {
         procmsg("Unexpected signal. %s \n",  strsignal(WSTOPSIG(wait_status)));
     }
  } 
