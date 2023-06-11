@@ -26,25 +26,38 @@ struct snapshot {
 
 struct snapshot latest_snapshot;
 
-void print_instruction(csh handle, unsigned char *code, size_t size, uint64_t address) {
+void print_instruction(csh handle, pid_t child, uint64_t address, int ninsn) {
+    long data;
+    unsigned char code[8]; // Assuming the maximum instruction size is 8 bytes
     cs_insn *insn;
-    size_t count;
+    size_t count, offset = 0;
 
-    count = cs_disasm(handle, code, size, address, 0, &insn);
-    if (count > 0) {
-        size_t j;
-        for (j = 0; j < count; j++) {
-            printf("\t%lx: ", insn[j].address);
-            for (size_t k = 0; k < insn[j].size; k++) {
-                printf("%02x ", code[k]);
+    for (int i = ninsn; i > 0; i-=count) {
+        data = ptrace(PTRACE_PEEKTEXT, child, address+offset, NULL);
+        memcpy(code, &data, sizeof(code));
+        count = cs_disasm(handle, code, sizeof(code), address+offset, 0, &insn);
+
+        if (count > 0) {
+            size_t c_off = 0;
+            size_t j;
+            for (j = 0; j < count && j < i; j++) {
+                printf("\t%"PRIx64": ", insn[j].address);
+                for (size_t k = 0; k < 8; k++) {
+                    if (k < insn[j].size)
+                        printf("%02x ", code[k+c_off]);
+                    else
+                        printf("   ");
+                }
+                printf("%s\t%s\n", insn[j].mnemonic, insn[j].op_str);
+                offset += insn[j].size;
+                c_off += insn[j].size;
             }
-            for (int x = insn[j].size; x < 8; x++) {
-                printf("   ");
-            }
-            printf("%s\t%s\n", insn[j].mnemonic, insn[j].op_str);
+
+            cs_free(insn, count);
+        } else {
+            printf("** the address is out of the range of the text section.\n");
+            break;
         }
-
-        cs_free(insn, count);
     }
 }
 
@@ -59,8 +72,8 @@ int main(int argc, char *argv[]) {
     pid_t child;
     int status;
     struct user_regs_struct regs;
-    unsigned char code[5]; // Assuming the maximum instruction size is 5 bytes
     csh handle;
+    unsigned char code[8]; // Assuming the maximum instruction size is 8 bytes
 
     // Initialize capstone disassembler
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
@@ -90,11 +103,7 @@ int main(int argc, char *argv[]) {
         printf("** program '%s' loaded. entry point 0x%lx\n", argv[1], entry_point);
 
         // Read and disassemble the first 5 instructions
-        for (int i = 0; i < 5; i++) {
-            long data = ptrace(PTRACE_PEEKTEXT, child, entry_point + i, NULL);
-            memcpy(code, &data, sizeof(code));
-            print_instruction(handle, code, sizeof(code), entry_point + i);
-        }
+        print_instruction(handle, child, entry_point, 5);
 
         while (1) {
             char command[100];
@@ -102,24 +111,7 @@ int main(int argc, char *argv[]) {
             fgets(command, sizeof(command), stdin);
 
             if (strcmp(command, "si\n") == 0) {
-                for (int i = 0; i < num_breakpoints; i++) {
-                    if (regs.rip-1 == breakpoints[i].addr && breakpoints[i].enabled) {
-                        /* restore break point */
-                        if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
-                            printf("** failed to restore break point\n");
-                            return 1;
-                        }
-                        /* set registers */
-                        regs.rip = regs.rip-1;
-                        regs.rdx = regs.rax;
-                        if (ptrace(PTRACE_SETREGS, child, 0, &regs) != 0) {
-                            printf("** failed to set registers\n");
-                            return 1;
-                        }
-                        breakpoints[i].enabled = false;
-                        break;
-                    }
-                }
+                /* single step */
                 ptrace(PTRACE_SINGLESTEP, child, NULL, NULL);
                 waitpid(child, &status, 0);
                 if (WIFEXITED(status)) {
@@ -127,32 +119,14 @@ int main(int argc, char *argv[]) {
                     break;
                 }
             } else if (strcmp(command, "cont\n") == 0) {
-                for (int i = 0; i < num_breakpoints; i++) {
-                    if (regs.rip-1 == breakpoints[i].addr && breakpoints[i].enabled) {
-                        /* restore break point */
-                        if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
-                            printf("** failed to restore break point\n");
-                            return 1;
-                        }
-                        /* set registers */
-                        regs.rip = regs.rip-1;
-                        regs.rdx = regs.rax;
-                        if (ptrace(PTRACE_SETREGS, child, 0, &regs) != 0) {
-                            printf("** failed to set registers\n");
-                            return 1;
-                        }
-                        breakpoints[i].enabled = false;
-                        break;
-                    }
-                }
-                /* reset break point */
+                /* enable break point */
                 ptrace(PTRACE_SINGLESTEP, child, NULL, NULL);
                 waitpid(child, &status, 0);
                 for (int i = 0; i < num_breakpoints; i++) {
                     if (!breakpoints[i].enabled) {
                         long int3 = (breakpoints[i].orig_data & 0xFFFFFFFFFFFFFF00) | 0xCC;
                         if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, int3) != 0) {
-                            printf("** failed to set breakpoint\n");
+                            printf("** failed reset breakpoint\n");
                             return 1;
                         }
                         breakpoints[i].enabled = true;
@@ -161,11 +135,6 @@ int main(int argc, char *argv[]) {
                 /* continue the execution */
                 ptrace(PTRACE_CONT, child, NULL, NULL);
                 waitpid(child, &status, 0);
-                // Flush output buffer
-                if (tcdrain(STDOUT_FILENO) == -1) {
-                    perror("tcdrain");
-                    return 1;
-                }
                 if (WIFEXITED(status)) {
                     printf("** the target program terminated.\n");
                     break;
@@ -197,7 +166,7 @@ int main(int argc, char *argv[]) {
                 // Save current state
                 latest_snapshot.regs = regs;
                 for (int i = 0; i < 5; i++) {
-                    long data = ptrace(PTRACE_PEEKTEXT, child, entry_point + i, NULL);
+                    long data = ptrace(PTRACE_PEEKTEXT, child, entry_point + i*8, NULL);
                     memcpy(latest_snapshot.code, &data, sizeof(code));
                 }
                 printf("** dropped an anchor\n");
@@ -217,20 +186,28 @@ int main(int argc, char *argv[]) {
                     for (int i = 0; i < num_breakpoints; i++) {
                         if (regs.rip-1 == breakpoints[i].addr && breakpoints[i].enabled) {
                             printf("** hit a breakpoint 0x%lx\n", breakpoints[i].addr);
+                            regs.rip--;
+                            /* restore break point */
+                            if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
+                                printf("** failed to restore break point\n");
+                                return 1;
+                            }
+                            /* step back */
+                            if (ptrace(PTRACE_SETREGS, child, 0, &regs) != 0) {
+                                printf("** failed to set registers\n");
+                                return 1;
+                            }
+                            breakpoints[i].enabled = false;
                             break;
                         }
                     }
                 } else {
-                    printf("** stopped 0x%llx, reason: %s\n", regs.rip-1, strsignal(WSTOPSIG(status)));
+                    printf("** stopped 0x%llx, reason: %s\n", regs.rip, strsignal(WSTOPSIG(status)));
                 }
             }
 
             // Read and disassemble the first 5 instructions
-            for (int i = 0; i < 5; i++) {
-                long data = ptrace(PTRACE_PEEKTEXT, child, regs.rip + i, NULL);
-                memcpy(code, &data, sizeof(code));
-                print_instruction(handle, code, sizeof(code), regs.rip + i);
-            }
+            print_instruction(handle, child, regs.rip, 5);
         }
 
         cs_close(&handle);
