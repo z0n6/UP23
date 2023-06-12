@@ -247,15 +247,19 @@ int main(int argc, char *argv[]) {
                 waitpid(child, &status, 0);
                 if (WIFEXITED(status)) {
                     printf("** the target program terminated.\n");
-                    exit(EXIT_SUCCESS);
+                    break;
                 }
+                
                 enable_all_breakpoint(child);
+                
                 ptrace(PTRACE_GETREGS, child, NULL, &regs);
                 if (hit_breakpoint(regs.rip, true)) {
                     disable_breakpoint(child, regs.rip);
                 }
+                
                 ptrace(PTRACE_GETREGS, child, NULL, &regs);
                 print_instruction(handle, child, regs.rip, N_INSN);
+            
             } else if (strcmp(command, "cont\n") == 0) {
                 /* enable break point */
                 ptrace(PTRACE_SINGLESTEP, child, NULL, NULL);
@@ -277,6 +281,7 @@ int main(int argc, char *argv[]) {
                     printf("** the target program terminated.\n");
                     break;
                 }
+                
                 ptrace(PTRACE_GETREGS, child, NULL, &regs);
                 if (hit_breakpoint(regs.rip-1, true)) {
                     disable_breakpoint(child, regs.rip-1);
@@ -288,22 +293,27 @@ int main(int argc, char *argv[]) {
                 } else {
                     printf("** stopped 0x%llx, reason: %s\n", regs.rip, strsignal(WSTOPSIG(status)));
                 }
+                
                 print_instruction(handle, child, regs.rip, N_INSN);
+            
             } else if (strncmp(command, "break ", 6) == 0) {
                 /* get breakpoint address */
                 long breakpoint_addr = strtol(command + 6, NULL, 16);
+                
                 /* get original text */
                 long data = ptrace(PTRACE_PEEKTEXT, child, breakpoint_addr, NULL);
+                
                 /* set breakpint */
                 add_breakpoint(breakpoint_addr, data);
                 ptrace(PTRACE_GETREGS, child, NULL, &regs);
                 if (breakpoint_addr != regs.rip) {
                     enable_breakpoint(child, breakpoint_addr);
                 }
+            
             } else if (strcmp(command, "anchor\n") == 0) {
-                // Snapshot process memory and registers
                 latest_snapshot = take_snapshot(child);
                 printf("** dropped an anchor\n");
+            
             } else if (strcmp(command, "timetravel\n") == 0) {
                 printf("** go back to the anchor point\n");
 
@@ -315,29 +325,17 @@ int main(int argc, char *argv[]) {
                 if (hit_breakpoint(regs.rip, false)) {
                     disable_breakpoint(child, regs.rip);
                 }
-                
-                // for (int i = 0; i < num_breakpoints; i++) {
-                //     if (regs.rip == breakpoints[i].addr && breakpoints[i].enabled) {
-                //         /* restore break point */
-                //         if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
-                //             errquit("Failed to restore breakpoint");
-                //         }
-                //         /* step back */
-                //         if (ptrace(PTRACE_SETREGS, child, 0, &regs) != 0) {
-                //             errquit("Failed to set registers");
-                //         }
-                //         breakpoints[i].enabled = false;
-                //         // printf("** breakpoint at 0x%lx is temprorarily disabled\n", breakpoints[i].addr);
-                //         break;
-                //     }
-                // }
-                // ptrace(PTRACE_GETREGS, child, NULL, &regs);
 
                 // Print instructions
                 ptrace(PTRACE_GETREGS, child, NULL, &regs);
                 print_instruction(handle, child, regs.rip, N_INSN);
+            
             } else if (strcmp(command, "exit\n") == 0) {
+                ptrace(PTRACE_CONT, child, NULL, SIGTERM);
+                waitpid(child, &status, 0);
+                printf("** the target program terminated.\n");
                 break;
+            
             } else {
                 printf("Undefined command: %s", command);
             }
