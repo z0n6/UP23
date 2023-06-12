@@ -22,6 +22,73 @@ struct breakpoint {
 struct breakpoint breakpoints[MAX_BREAKPOINTS];
 int num_breakpoints = 0;
 
+void add_breakpoint(long addr, long orig_data) {
+    if (num_breakpoints < MAX_BREAKPOINTS) {
+        struct breakpoint bp = {addr, orig_data, false};
+        breakpoints[num_breakpoints] = bp;
+        num_breakpoints++;
+        printf("** set a breakpoint at 0x%lx\n", addr);
+    } else {
+        printf("** maximum number of breakpoints reached\n");
+    }
+}
+
+void enable_breakpoint(pid_t child, long addr) {
+    for (int i = 0; i < num_breakpoints; i++) {
+        if (breakpoints[i].addr == addr) {
+            if (!breakpoints[i].enabled) {
+                long int3 = (breakpoints[i].orig_data & 0xFFFFFFFFFFFFFF00) | 0xCC;
+                if (ptrace(PTRACE_POKETEXT, child, addr, int3) != 0) {
+                    printf("** failed to enable breakpoint\n");
+                    return;
+                }
+                breakpoints[i].enabled = true;
+            }
+            return;
+        }
+    }
+    printf("** breakpoint at 0x%lx not found\n", addr);
+}
+
+void enable_all_breakpoint(pid_t child) {
+    for (int i = 0; i < num_breakpoints; i++) {
+        if (!breakpoints[i].enabled) {
+            long int3 = (breakpoints[i].orig_data & 0xFFFFFFFFFFFFFF00) | 0xCC;
+            if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, int3) != 0) {
+                printf("** failed to enable breakpoint at 0x%lx\n", breakpoints[i].addr);
+                return;
+            }
+            breakpoints[i].enabled = true;
+        }
+    }
+}
+
+void disable_breakpoint(pid_t child, long addr) {
+    for (int i = 0; i < num_breakpoints; i++) {
+        if (breakpoints[i].addr == addr) {
+            if (breakpoints[i].enabled) {
+                if (ptrace(PTRACE_POKETEXT, child, addr, breakpoints[i].orig_data) != 0) {
+                    printf("** failed to disable breakpoint\n");
+                    return;
+                }
+                breakpoints[i].enabled = false;
+            }
+            return;
+        }
+    }
+    printf("** breakpoint at 0x%lx not found\n", addr);
+}
+
+bool hit_breakpoint(long addr, bool verbose) {
+    for (int i = 0; i < num_breakpoints; i++) {
+        if (breakpoints[i].addr == addr && breakpoints[i].enabled) {
+            if (verbose) printf("** hit a breakpoint 0x%lx\n", addr);
+            return true;
+        }
+    }
+    return false;
+}
+
 typedef struct {
     struct user_regs_struct regs;
     unsigned long long start_addr;
@@ -35,9 +102,9 @@ Snapshot take_snapshot(pid_t pid) {
     Snapshot snapshot;
 
     // Read process registers
-    ptrace(PTRACE_GETREGS, pid, NULL, &snapshot.regs);
+    ptrace(PTRACE_GETREGS, pid, NULL, &(snapshot.regs));
 
-    // Read process memory
+    // Get process memory address and size
     FILE* maps_file;
     char maps_path[256];
     sprintf(maps_path, "/proc/%d/maps", pid);
@@ -58,14 +125,15 @@ Snapshot take_snapshot(pid_t pid) {
         }
     }
 
+    // Snapshot the process memory
     snapshot.memory = malloc(snapshot.size);
-
-    for (size_t offset = 0; offset < snapshot.size; offset += sizeof(long)) {
-        long data = ptrace(PTRACE_PEEKDATA, pid, snapshot.start_addr + offset, NULL);
+    long data;
+    for (size_t offset = 0; offset < snapshot.size; offset += sizeof(data)) {
+        data = ptrace(PTRACE_PEEKDATA, pid, snapshot.start_addr + offset, NULL);
         if (data == -1) {
             errquit("Failed to read memory");
         }
-        memcpy(snapshot.memory+offset, &data, sizeof(long));
+        memcpy(snapshot.memory + offset, &data, sizeof(data));
     }
 
     fclose(maps_file);
@@ -81,9 +149,13 @@ void restore_snapshot(pid_t pid, Snapshot snapshot) {
     long data;
     for (size_t offset = 0; offset < snapshot.size; offset += sizeof(data)) {
         memcpy(&data, snapshot.memory + offset, sizeof(data));
-        ptrace(PTRACE_POKEDATA, pid, snapshot.start_addr + offset, data);
+        if (ptrace(PTRACE_POKEDATA, pid, snapshot.start_addr + offset, data) == -1) {
+            errquit("Failed to write memory");
+        }
     }
 }
+
+#define N_INSN 5
 
 void print_instruction(csh handle, pid_t child, uint64_t address, int ninsn) {
     long data;
@@ -161,7 +233,7 @@ int main(int argc, char *argv[]) {
         printf("** program '%s' loaded. entry point 0x%lx\n", argv[1], entry_point);
 
         // Read and disassemble the first 5 instructions
-        print_instruction(handle, child, entry_point, 5);
+        print_instruction(handle, child, entry_point, N_INSN);
 
         /* handle commands */
         while (1) {
@@ -175,66 +247,29 @@ int main(int argc, char *argv[]) {
                 waitpid(child, &status, 0);
                 if (WIFEXITED(status)) {
                     printf("** the target program terminated.\n");
-                    break;
+                    exit(EXIT_SUCCESS);
                 }
-                for (int i = 0; i < num_breakpoints; i++) {
-                    if (!breakpoints[i].enabled) {
-                        long int3 = (breakpoints[i].orig_data & 0xFFFFFFFFFFFFFF00) | 0xCC;
-                        if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, int3) != 0) {
-                            errquit("Failed to reset breakpoint");
-                        }
-                        breakpoints[i].enabled = true;
-                        // printf("** breakpoint at 0x%lx is enabled\n", breakpoints[i].addr);
-                    }
+                enable_all_breakpoint(child);
+                ptrace(PTRACE_GETREGS, child, NULL, &regs);
+                if (hit_breakpoint(regs.rip, true)) {
+                    disable_breakpoint(child, regs.rip);
                 }
                 ptrace(PTRACE_GETREGS, child, NULL, &regs);
-                for (int i = 0; i < num_breakpoints; i++) {
-                    if (breakpoints[i].addr == regs.rip && breakpoints[i].enabled) {
-                        printf("** hit a breakpoint 0x%lx\n", breakpoints[i].addr);
-                        /* restore break point */
-                        if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
-                            errquit("failed to restore break point");
-                        }
-                        breakpoints[i].enabled = false;
-                        break;
-                    }
-                }
-                ptrace(PTRACE_GETREGS, child, NULL, &regs);
-                print_instruction(handle, child, regs.rip, 5);
+                print_instruction(handle, child, regs.rip, N_INSN);
             } else if (strcmp(command, "cont\n") == 0) {
                 /* enable break point */
                 ptrace(PTRACE_SINGLESTEP, child, NULL, NULL);
                 waitpid(child, &status, 0);
-                for (int i = 0; i < num_breakpoints; i++) {
-                    if (!breakpoints[i].enabled) {
-                        long int3 = (breakpoints[i].orig_data & 0xFFFFFFFFFFFFFF00) | 0xCC;
-                        if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, int3) != 0) {
-                            errquit("Failed to reset breakpoint");
-                        }
-                        breakpoints[i].enabled = true;
-                        // printf("** breakpoint at 0x%lx is enabled\n", breakpoints[i].addr);
-                    }
-                }
+                enable_all_breakpoint(child);
+
                 /* handle continuous breakpoint */
                 ptrace(PTRACE_GETREGS, child, NULL, &regs);
-                bool hit = false;
-                for (int i = 0; i < num_breakpoints; i++) {
-                    if (breakpoints[i].addr == regs.rip && breakpoints[i].enabled) {
-                        printf("** hit a breakpoint 0x%lx\n", breakpoints[i].addr);
-                        /* restore break point */
-                        if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
-                            errquit("Failed to restore breakpoint");
-                        }
-                        breakpoints[i].enabled = false;
-                        hit = true;
-                        break;
-                    }
-                }
-                if (hit) {
-                    // printf("** continuous breakpoint\n");
-                    print_instruction(handle, child, regs.rip, 5);
+                if (hit_breakpoint(regs.rip, true)) {
+                    disable_breakpoint(child, regs.rip);
+                    print_instruction(handle, child, regs.rip, N_INSN);
                     continue;
                 }
+                
                 /* continue the execution */
                 ptrace(PTRACE_CONT, child, NULL, NULL);
                 waitpid(child, &status, 0);
@@ -243,54 +278,27 @@ int main(int argc, char *argv[]) {
                     break;
                 }
                 ptrace(PTRACE_GETREGS, child, NULL, &regs);
-                if (WSTOPSIG(status) == SIGTRAP) {
-                    for (int i = 0; i < num_breakpoints; i++) {
-                        if (regs.rip-1 == breakpoints[i].addr && breakpoints[i].enabled) {
-                            printf("** hit a breakpoint 0x%lx\n", breakpoints[i].addr);
-                            regs.rip--;
-                            /* restore break point */
-                            if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
-                                errquit("Failed to restore breakpoint");
-                            }
-                            /* step back */
-                            if (ptrace(PTRACE_SETREGS, child, 0, &regs) != 0) {
-                                errquit("Failed to set registers");
-                            }
-                            breakpoints[i].enabled = false;
-                            // printf("** breakpoint at 0x%lx is temprorarily disabled\n", breakpoints[i].addr);
-                            break;
-                        }
+                if (hit_breakpoint(regs.rip-1, true)) {
+                    disable_breakpoint(child, regs.rip-1);
+                    /* step back */
+                    regs.rip--;
+                    if (ptrace(PTRACE_SETREGS, child, 0, &regs) != 0) {
+                        errquit("Failed to set registers");
                     }
                 } else {
                     printf("** stopped 0x%llx, reason: %s\n", regs.rip, strsignal(WSTOPSIG(status)));
                 }
-                print_instruction(handle, child, regs.rip, 5);
+                print_instruction(handle, child, regs.rip, N_INSN);
             } else if (strncmp(command, "break ", 6) == 0) {
-                // get breakpoint address
+                /* get breakpoint address */
                 long breakpoint_addr = strtol(command + 6, NULL, 16);
-                if (num_breakpoints < MAX_BREAKPOINTS) {
-                    /* get original text */
-                    long data = ptrace(PTRACE_PEEKTEXT, child, breakpoint_addr, NULL);
-                    /* store breakpoint info */
-                    ptrace(PTRACE_GETREGS, child, NULL, &regs);
-                    if (breakpoint_addr != regs.rip) {
-                        struct breakpoint bp = {breakpoint_addr, data, true};
-                        breakpoints[num_breakpoints] = bp;
-                        num_breakpoints++;
-                        // modify the instruction on the address as a breakpoint instruction
-                        long int3 = (data & 0xFFFFFFFFFFFFFF00) | 0xCC;
-                        if (ptrace(PTRACE_POKETEXT, child, breakpoint_addr, int3) != 0) {
-                            printf("** failed to set breakpoint\n");
-                            continue;
-                        }
-                    } else {
-                        struct breakpoint bp = {breakpoint_addr, data, false};
-                        breakpoints[num_breakpoints] = bp;
-                        num_breakpoints++;
-                    }
-                    printf("** set a breakpoint at 0x%lx\n", breakpoint_addr);
-                } else {
-                    printf("** maximum number of breakpoints reached\n");
+                /* get original text */
+                long data = ptrace(PTRACE_PEEKTEXT, child, breakpoint_addr, NULL);
+                /* set breakpint */
+                add_breakpoint(breakpoint_addr, data);
+                ptrace(PTRACE_GETREGS, child, NULL, &regs);
+                if (breakpoint_addr != regs.rip) {
+                    enable_breakpoint(child, breakpoint_addr);
                 }
             } else if (strcmp(command, "anchor\n") == 0) {
                 // Snapshot process memory and registers
@@ -302,26 +310,32 @@ int main(int argc, char *argv[]) {
                 // Restore original process state
                 restore_snapshot(child, latest_snapshot);
 
+                // disable head breakpoint
+                ptrace(PTRACE_GETREGS, child, NULL, &regs);
+                if (hit_breakpoint(regs.rip, false)) {
+                    disable_breakpoint(child, regs.rip);
+                }
+                
+                // for (int i = 0; i < num_breakpoints; i++) {
+                //     if (regs.rip == breakpoints[i].addr && breakpoints[i].enabled) {
+                //         /* restore break point */
+                //         if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
+                //             errquit("Failed to restore breakpoint");
+                //         }
+                //         /* step back */
+                //         if (ptrace(PTRACE_SETREGS, child, 0, &regs) != 0) {
+                //             errquit("Failed to set registers");
+                //         }
+                //         breakpoints[i].enabled = false;
+                //         // printf("** breakpoint at 0x%lx is temprorarily disabled\n", breakpoints[i].addr);
+                //         break;
+                //     }
+                // }
+                // ptrace(PTRACE_GETREGS, child, NULL, &regs);
+
                 // Print instructions
                 ptrace(PTRACE_GETREGS, child, NULL, &regs);
-                // disable head breakpoint
-                for (int i = 0; i < num_breakpoints; i++) {
-                    if (regs.rip == breakpoints[i].addr && breakpoints[i].enabled) {
-                        /* restore break point */
-                        if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
-                            errquit("Failed to restore breakpoint");
-                        }
-                        /* step back */
-                        if (ptrace(PTRACE_SETREGS, child, 0, &regs) != 0) {
-                            errquit("Failed to set registers");
-                        }
-                        breakpoints[i].enabled = false;
-                        // printf("** breakpoint at 0x%lx is temprorarily disabled\n", breakpoints[i].addr);
-                        break;
-                    }
-                }
-                ptrace(PTRACE_GETREGS, child, NULL, &regs);
-                print_instruction(handle, child, regs.rip, 5);
+                print_instruction(handle, child, regs.rip, N_INSN);
             } else if (strcmp(command, "exit\n") == 0) {
                 break;
             } else {
