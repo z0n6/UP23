@@ -10,6 +10,8 @@
 #include <sys/user.h>
 #include <capstone/capstone.h>
 
+#define errquit(m) { perror(m); exit(EXIT_FAILURE); }
+
 struct breakpoint {
     long addr;
     long orig_data;
@@ -41,8 +43,7 @@ Snapshot take_snapshot(pid_t pid) {
     sprintf(maps_path, "/proc/%d/maps", pid);
     maps_file = fopen(maps_path, "r");
     if (maps_file == NULL) {
-        perror("Failed to open maps file");
-        exit(1);
+        errquit("Failed to open maps file");
     }
 
     char line[256];
@@ -62,8 +63,7 @@ Snapshot take_snapshot(pid_t pid) {
     for (size_t offset = 0; offset < snapshot.size; offset += sizeof(long)) {
         long data = ptrace(PTRACE_PEEKDATA, pid, snapshot.start_addr + offset, NULL);
         if (data == -1) {
-            perror("Failed to read memory\n");
-            exit(1);
+            errquit("Failed to read memory");
         }
         memcpy(snapshot.memory+offset, &data, sizeof(long));
     }
@@ -138,8 +138,7 @@ int main(int argc, char *argv[]) {
 
     // Initialize capstone disassembler
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
-        printf("** failed to initialize disassembler\n");
-        return 1;
+        errquit("Failed to initialize disassembler");
     }
 
     child = fork();
@@ -147,14 +146,12 @@ int main(int argc, char *argv[]) {
         // Child process
         ptrace(PTRACE_TRACEME, 0, NULL, NULL);
         execvp(argv[1], argv + 1);
-        printf("** failed to execute the program\n");
-        return 1;
+        errquit("Failed to execute the program");
     } else if (child > 0) {
         // Parent process
         waitpid(child, &status, 0);
         if (!WIFSTOPPED(status)) {
-            printf("** the child process failed to start\n");
-            return 1;
+            errquit("The child process failed to start");
         }
 
         // Get entry point address
@@ -184,8 +181,7 @@ int main(int argc, char *argv[]) {
                     if (!breakpoints[i].enabled) {
                         long int3 = (breakpoints[i].orig_data & 0xFFFFFFFFFFFFFF00) | 0xCC;
                         if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, int3) != 0) {
-                            printf("** failed reset breakpoint\n");
-                            return 1;
+                            errquit("Failed to reset breakpoint");
                         }
                         breakpoints[i].enabled = true;
                         // printf("** breakpoint at 0x%lx is enabled\n", breakpoints[i].addr);
@@ -197,8 +193,7 @@ int main(int argc, char *argv[]) {
                         printf("** hit a breakpoint 0x%lx\n", breakpoints[i].addr);
                         /* restore break point */
                         if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
-                            printf("** failed to restore break point\n");
-                            return 1;
+                            errquit("failed to restore break point");
                         }
                         breakpoints[i].enabled = false;
                         break;
@@ -214,8 +209,7 @@ int main(int argc, char *argv[]) {
                     if (!breakpoints[i].enabled) {
                         long int3 = (breakpoints[i].orig_data & 0xFFFFFFFFFFFFFF00) | 0xCC;
                         if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, int3) != 0) {
-                            printf("** failed reset breakpoint\n");
-                            return 1;
+                            errquit("Failed to reset breakpoint");
                         }
                         breakpoints[i].enabled = true;
                         // printf("** breakpoint at 0x%lx is enabled\n", breakpoints[i].addr);
@@ -229,8 +223,7 @@ int main(int argc, char *argv[]) {
                         printf("** hit a breakpoint 0x%lx\n", breakpoints[i].addr);
                         /* restore break point */
                         if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
-                            printf("** failed to restore break point\n");
-                            return 1;
+                            errquit("Failed to restore breakpoint");
                         }
                         breakpoints[i].enabled = false;
                         hit = true;
@@ -257,13 +250,11 @@ int main(int argc, char *argv[]) {
                             regs.rip--;
                             /* restore break point */
                             if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
-                                printf("** failed to restore break point\n");
-                                return 1;
+                                errquit("Failed to restore breakpoint");
                             }
                             /* step back */
                             if (ptrace(PTRACE_SETREGS, child, 0, &regs) != 0) {
-                                printf("** failed to set registers\n");
-                                return 1;
+                                errquit("Failed to set registers");
                             }
                             breakpoints[i].enabled = false;
                             // printf("** breakpoint at 0x%lx is temprorarily disabled\n", breakpoints[i].addr);
@@ -318,13 +309,11 @@ int main(int argc, char *argv[]) {
                     if (regs.rip == breakpoints[i].addr && breakpoints[i].enabled) {
                         /* restore break point */
                         if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
-                            printf("** failed to restore break point\n");
-                            return 1;
+                            errquit("Failed to restore breakpoint");
                         }
                         /* step back */
                         if (ptrace(PTRACE_SETREGS, child, 0, &regs) != 0) {
-                            printf("** failed to set registers\n");
-                            return 1;
+                            errquit("Failed to set registers");
                         }
                         breakpoints[i].enabled = false;
                         // printf("** breakpoint at 0x%lx is temprorarily disabled\n", breakpoints[i].addr);
@@ -342,8 +331,7 @@ int main(int argc, char *argv[]) {
 
         cs_close(&handle);
     } else {
-        printf("** fork failed\n");
-        return 1;
+        errquit("Failed to fork");
     }
 
     return 0;
