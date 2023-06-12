@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <sys/user.h>
 #include <capstone/capstone.h>
 
@@ -21,8 +22,9 @@ int num_breakpoints = 0;
 
 typedef struct {
     struct user_regs_struct regs;
-    char* memory;
+    unsigned long long start_addr;
     size_t size;
+    char* memory;
 } Snapshot;
 
 Snapshot latest_snapshot;
@@ -31,43 +33,56 @@ Snapshot take_snapshot(pid_t pid) {
     Snapshot snapshot;
 
     // Read process registers
-    ptrace(PTRACE_GETREGS, pid, NULL, &(snapshot.regs));
+    ptrace(PTRACE_GETREGS, pid, NULL, &snapshot.regs);
 
     // Read process memory
-    long data;
-    size_t i = 0;
-    snapshot.memory = malloc(sizeof(char));
-    while (1) {
-        data = ptrace(PTRACE_PEEKDATA, pid, snapshot.regs.rsp + i, NULL);
-        memcpy(snapshot.memory + i, &data, sizeof(data));
-        i += sizeof(data);
-
-        // Reallocate memory if necessary
-        snapshot.memory = realloc(snapshot.memory, (i + sizeof(data)));
-
-        // Check if PTRACE_PEEKDATA failed (reached end of accessible memory)
-        if (data == -1)
-            break;
+    FILE* maps_file;
+    char maps_path[256];
+    sprintf(maps_path, "/proc/%d/maps", pid);
+    maps_file = fopen(maps_path, "r");
+    if (maps_file == NULL) {
+        perror("Failed to open maps file");
+        exit(1);
     }
-    snapshot.size = i;
+
+    char line[256];
+    while (fgets(line, sizeof(line), maps_file)) {
+        unsigned long long start, end;
+        char permissions[5];
+        sscanf(line, "%llx-%llx %4s", &start, &end, permissions);
+        if (strcmp(permissions, "rw-p") == 0) {
+            snapshot.start_addr = start;
+            snapshot.size = end - start;
+            break;
+        }
+    }
+
+    snapshot.memory = malloc(snapshot.size);
+
+    for (size_t offset = 0; offset < snapshot.size; offset += sizeof(long)) {
+        long data = ptrace(PTRACE_PEEKDATA, pid, snapshot.start_addr + offset, NULL);
+        if (data == -1) {
+            perror("Failed to read memory\n");
+            exit(1);
+        }
+        memcpy(snapshot.memory+offset, &data, sizeof(long));
+    }
+
+    fclose(maps_file);
 
     return snapshot;
 }
 
 void restore_snapshot(pid_t pid, Snapshot snapshot) {
-    // Restore process registers
+    // Write process registers
     ptrace(PTRACE_SETREGS, pid, NULL, &(snapshot.regs));
 
-    // Restore process memory
-    size_t i = 0;
+    // Write process memory
     long data;
-    while (i < snapshot.size) {
-        memcpy(&data, snapshot.memory + i, sizeof(data));
-        ptrace(PTRACE_POKEDATA, pid, snapshot.regs.rsp + i, data);
-        i += sizeof(data);
+    for (size_t offset = 0; offset < snapshot.size; offset += sizeof(data)) {
+        memcpy(&data, snapshot.memory + offset, sizeof(data));
+        ptrace(PTRACE_POKEDATA, pid, snapshot.start_addr + offset, data);
     }
-
-    free(snapshot.memory);
 }
 
 void print_instruction(csh handle, pid_t child, uint64_t address, int ninsn) {
@@ -165,9 +180,21 @@ int main(int argc, char *argv[]) {
                     printf("** the target program terminated.\n");
                     break;
                 }
+                for (int i = 0; i < num_breakpoints; i++) {
+                    if (!breakpoints[i].enabled) {
+                        long int3 = (breakpoints[i].orig_data & 0xFFFFFFFFFFFFFF00) | 0xCC;
+                        if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, int3) != 0) {
+                            printf("** failed reset breakpoint\n");
+                            return 1;
+                        }
+                        breakpoints[i].enabled = true;
+                        // printf("** breakpoint at 0x%lx is enabled\n", breakpoints[i].addr);
+                    }
+                }
                 ptrace(PTRACE_GETREGS, child, NULL, &regs);
                 for (int i = 0; i < num_breakpoints; i++) {
                     if (breakpoints[i].addr == regs.rip && breakpoints[i].enabled) {
+                        printf("** hit a breakpoint 0x%lx\n", breakpoints[i].addr);
                         /* restore break point */
                         if (ptrace(PTRACE_POKETEXT, child, breakpoints[i].addr, breakpoints[i].orig_data) != 0) {
                             printf("** failed to restore break point\n");
