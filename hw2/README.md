@@ -1,4 +1,57 @@
-# UP23 HW2
+# HW2 — Simple Instruction-Level Debugger (`sdb`)
+
+## 題目描述（中文摘要）
+用 `ptrace` 實作一個 **組語層級** 的互動式 debugger（類似縮小版 `gdb` / `lldb`），本作業只需處理 `static-nopie` 的 ELF64 執行檔。
+
+啟動時由 debugger `execv` 目標程式、停在 entry point，接著進入 REPL 等待使用者輸入指令。支援的指令包含：
+
+- `si`：single step 一條指令。
+- `cont`：繼續執行，直到遇到斷點或結束。
+- `break <addr>`：在指定位址下斷點（`int3` / `0xcc`）。
+- `info reg`：列出所有通用暫存器內容。
+- `info break`：列出目前所有斷點。
+- `delete <id>`：刪除指定斷點。
+- `patch <addr> <hexstring>`：把指定位址的 bytes 改成給定的 hex。
+- `timetravel`：支援「後悔鍵」，把程式狀態回捲到最近一個 snapshot。
+- 其他輸出格式化：每次停下來後 **反組譯從目前 `rip` 開始的 5 條指令**（用 `capstone` library），對齊印出 `address | raw bytes | mnemonic | operands`。
+
+核心學習點：`ptrace` 控制流程、`capstone` 反組譯、ELF header 解析 text 段邊界、`int3` breakpoint 的埋/清流程、以及 timetravel 用 `PTRACE_GETREGS` / `PTRACE_PEEKDATA` 做 snapshot。
+
+## 檔案說明
+| 檔案 | 說明 |
+| --- | --- |
+| `sdb.c` | 我的 `sdb` debugger 實作主體 |
+| `Makefile` | `gcc -g -Wall -lcapstone` 編譯所有 `.c` |
+| `hello64` / `hello` / `guess` | 課程提供的測試程式（static-nopie ELF） |
+| `testcases/` | 進階測試：`deep`, `guess`, `hello`, `loop1` |
+
+## 編譯 / 執行方式
+```bash
+# 需要先安裝 capstone
+sudo apt install libcapstone-dev
+
+make
+./sdb ./hello64
+(sdb) si
+(sdb) break 0x4000c4
+(sdb) cont
+(sdb) info reg
+(sdb) timetravel
+```
+
+## 解題思路 / 備註
+- **ELF parsing**：手動讀 `Elf64_Ehdr` + section header，找到 `.text` 的 `[start, end)` 範圍；反組譯時限制只印落在這區間內的指令。
+- **Breakpoint**：存下 `addr` 原本的那個 byte，用 `PTRACE_POKEDATA` 把 `0xcc` 寫進去；被命中時 `rip` 會停在 `addr + 1`，要把 `rip` 回捲 1，restore 原 byte，然後單步執行再重新打回 `0xcc`（才能下次再觸發）。
+- **Disassemble 5 條**：用 `cs_disasm_iter`；為了處理「patch / breakpoint 下的 byte 不該顯示 0xcc」，讀出 memory bytes 後先把 breakpoint 上的 byte 換回原值再餵給 capstone。
+- **Timetravel**：每次 `si/cont` 之前用 `PTRACE_GETREGS` + 對所有可寫 memory page dump snapshot；`timetravel` 時 `PTRACE_SETREGS` 把暫存器還原、`PTRACE_POKEDATA` 把記憶體 restore。為了省空間只紀錄差異 page。
+- 小坑：從 trap 恢復時要區分 *斷點* 與 *單步*；如果使用者在當前 `rip` 上下斷點，`si` 要特別 handle，不然會立刻又 trap。
+
+---
+
+以下保留課程原始英文規格作為參考。
+
+---
+
 <i style="color:red">Due Date: 2023-06-05</i>
 
 [TOC]
